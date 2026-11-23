@@ -65,3 +65,10 @@ AWS CLI and SAM CLI were not installed on this host. No AWS account identity or 
 - CloudFront delivery, origin access restriction and deployment invalidation.
 
 Use the README deployment script, `scripts/smoke.mjs`, and `docs/TESTING.md` to complete these checks. This repository is implemented and locally verified; it is not represented as an already deployed cloud service.
+
+## Publication and deployment preparation follow-up
+
+- Published publicly, with explicit user approval, to https://github.com/Abhishek240514/cloud_project on branch `main`.
+- Installed AWS CLI 2.42.1 and SAM CLI 1.174.0 on the development machine.
+- `sam validate --lint --template-file template.yaml --region us-east-1` passed.
+- AWS STS identity check returned `NoCredentials`; browser sign-in is required before deployment. No cloud stack or live Gemini request has been performed.

@@ -256,7 +256,7 @@ CloudWatch logs are created on invocation; configure retention and billing alert
 
 ## GitHub handoff
 
-The repository is initialized on `main` with an initial implementation commit. No remote is configured and nothing has been pushed. Review ignored environment files before committing.
+The project is published at [Abhishek240514/cloud_project](https://github.com/Abhishek240514/cloud_project) on `main`. The supplied checkout tracks that repository as `origin`. Review ignored environment files before committing.
 
 ```bash
 cd /path/to/this/project
