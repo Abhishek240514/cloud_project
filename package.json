@@ -1,0 +1,26 @@
+{
+  "name": "collaborative-whiteboard",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "frontend",
+    "backend"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w frontend",
+    "build": "npm run build -w frontend && node scripts/build-backend.mjs",
+    "test": "node --test backend/test/*.test.js tests/*.test.js",
+    "check": "npm test && npm run build",
+    "deploy": "bash scripts/deploy.sh",
+    "format": "prettier --write \"frontend/src/**/*.{js,jsx,css}\" \"backend/**/*.js\" \"scripts/*.mjs\" \"tests/*.js\" \"*.json\" \"frontend/*.json\" \"backend/*.json\" frontend/index.html"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "prettier": "^3.10.1",
+    "yaml": "^2.8.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

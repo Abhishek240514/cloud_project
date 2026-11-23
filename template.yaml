@@ -1,0 +1,311 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Serverless collaborative whiteboard - React, WebSocket, DynamoDB, Gemini
+Parameters:
+  GeminiSecretArn:
+    Type: String
+    Description: ARN of an existing Secrets Manager secret containing {"apiKey":"..."}
+  GeminiModel:
+    Type: String
+    AllowedPattern: '[a-zA-Z0-9.-]+'
+    Description: An available Gemini model supporting generateContent with image input
+  LocalOrigin:
+    Type: String
+    Default: http://localhost:5173
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Architectures: [arm64]
+    MemorySize: 256
+    Timeout: 28
+    Environment:
+      Variables:
+        BOARDS_TABLE: !Ref BoardsTable
+        CONNECTIONS_TABLE: !Ref ConnectionsTable
+Resources:
+  BoardsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{AttributeName: boardId, AttributeType: S}]
+      KeySchema: [{AttributeName: boardId, KeyType: HASH}]
+      SSESpecification: {SSEEnabled: true}
+      PointInTimeRecoverySpecification: {PointInTimeRecoveryEnabled: true}
+  ConnectionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: connectionId, AttributeType: S}
+        - {AttributeName: boardId, AttributeType: S}
+      KeySchema: [{AttributeName: connectionId, KeyType: HASH}]
+      GlobalSecondaryIndexes:
+        - IndexName: byBoard
+          KeySchema: [{AttributeName: boardId, KeyType: HASH}]
+          Projection: {ProjectionType: ALL}
+      TimeToLiveSpecification: {AttributeName: expiresAt, Enabled: true}
+      SSESpecification: {SSEEnabled: true}
+  WebSocketApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub '${AWS::StackName}-websocket'
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: '$request.body.action'
+  WebSocketStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref WebSocketApi
+      StageName: prod
+      AutoDeploy: true
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 40
+        ThrottlingRateLimit: 20
+        DetailedMetricsEnabled: true
+  ConnectFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .aws-sam/build/handlers/
+      Handler: socket.handler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:PutItem]
+              Resource: !GetAtt BoardsTable.Arn
+            - Effect: Allow
+              Action: dynamodb:PutItem
+              Resource: !GetAtt ConnectionsTable.Arn
+  DisconnectFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .aws-sam/build/handlers/
+      Handler: socket.handler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: dynamodb:DeleteItem
+              Resource: !GetAtt ConnectionsTable.Arn
+  DrawFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .aws-sam/build/handlers/
+      Handler: socket.handler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:PutItem]
+              Resource: !GetAtt BoardsTable.Arn
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:DeleteItem]
+              Resource: !GetAtt ConnectionsTable.Arn
+            - Effect: Allow
+              Action: dynamodb:Query
+              Resource: !Sub '${ConnectionsTable.Arn}/index/byBoard'
+            - Effect: Allow
+              Action: execute-api:ManageConnections
+              Resource: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/prod/POST/@connections/*'
+  ConnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ConnectFunction.Arn}/invocations'
+  DisconnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DisconnectFunction.Arn}/invocations'
+  DrawIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DrawFunction.Arn}/invocations'
+  ConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: '$connect'
+      AuthorizationType: NONE
+      Target: !Sub 'integrations/${ConnectIntegration}'
+  DisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: '$disconnect'
+      AuthorizationType: NONE
+      Target: !Sub 'integrations/${DisconnectIntegration}'
+  DrawRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: draw
+      AuthorizationType: NONE
+      Target: !Sub 'integrations/${DrawIntegration}'
+  SyncRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: sync
+      AuthorizationType: NONE
+      Target: !Sub 'integrations/${DrawIntegration}'
+  ClearRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: clear
+      AuthorizationType: NONE
+      Target: !Sub 'integrations/${DrawIntegration}'
+  DefaultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: '$default'
+      AuthorizationType: NONE
+      Target: !Sub 'integrations/${DrawIntegration}'
+  ConnectPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ConnectFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*/$connect'
+  DisconnectPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref DisconnectFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*/$disconnect'
+  DrawPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref DrawFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*'
+  RestApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      EndpointConfiguration: REGIONAL
+      Cors:
+        AllowMethods: "'POST,OPTIONS'"
+        AllowHeaders: "'Content-Type'"
+        AllowOrigin: "'*'"
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          ThrottlingBurstLimit: 5
+          ThrottlingRateLimit: 2
+      GatewayResponses:
+        DEFAULT_4XX:
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: "'*'"
+        DEFAULT_5XX:
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: "'*'"
+  SummaryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .aws-sam/build/handlers/
+      Handler: summary.handler
+      MemorySize: 512
+      Environment:
+        Variables:
+          GEMINI_SECRET_ARN: !Ref GeminiSecretArn
+          GEMINI_MODEL: !Ref GeminiModel
+          ALLOWED_ORIGINS: !Sub 'https://${Distribution.DomainName},${LocalOrigin},http://127.0.0.1:5173'
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:UpdateItem]
+              Resource: !GetAtt BoardsTable.Arn
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Ref GeminiSecretArn
+      Events:
+        Summarize:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /summarize
+            Method: post
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+      OwnershipControls:
+        Rules: [{ObjectOwnership: BucketOwnerEnforced}]
+  OriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-oac'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        HttpVersion: http2
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: frontend
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !Ref OriginAccessControl
+            S3OriginConfig: {OriginAccessIdentity: ''}
+        DefaultCacheBehavior:
+          TargetOriginId: frontend
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03
+        ViewerCertificate: {CloudFrontDefaultCertificate: true}
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: cloudfront.amazonaws.com}
+            Action: s3:GetObject
+            Resource: !Sub '${FrontendBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}'
+Outputs:
+  WebSocketUrl:
+    Value: !Sub 'wss://${WebSocketApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/prod'
+  RestApiUrl:
+    Value: !Sub 'https://${RestApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/prod'
+  WebsiteUrl:
+    Value: !Sub 'https://${Distribution.DomainName}'
+  FrontendBucketName:
+    Value: !Ref FrontendBucket
+  DistributionId:
+    Value: !Ref Distribution
+  BoardsTableName:
+    Value: !Ref BoardsTable
+  ConnectionsTableName:
+    Value: !Ref ConnectionsTable
